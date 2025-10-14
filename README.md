@@ -5,6 +5,7 @@ Pre-requisites
 1) Ansible
 2) Ansible-collection
 3) Run india_download_geo2.sh in the /root/geo2day_india folder to pull all .osm.pbf files from geo2day.com
+4) Created /root/ansible_india folder and run the ansible scripts (*.yml) files with the command ansible-playbook playbook.yml --connection=local -vvv
 
 Notes: 
 1) Playbook.yml and Play_run.yml do not run on ARM64. Tool used is Tilemaker
