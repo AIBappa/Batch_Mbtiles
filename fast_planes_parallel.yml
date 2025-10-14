@@ -8,9 +8,9 @@
     openmaptiles_dir: /root/geo2day_mbtiles_india_openmaptiles
     routing_dir: /root/geo2day_routing_india
     # Parallel jobs - ARM64 Ampere typically has many cores, adjust based on your CPU count
-    parallel_jobs: 2  # Conservative for 4GB RAM, increase if you have more RAM
+    parallel_jobs: 4  # Conservative for 4GB RAM, increase if you have more RAM
     # Memory per job (in MB) - with 4GB total, leave 500MB for OS
-    memory_per_job: 1750
+    memory_per_job: 3500
 
   tasks:
     - name: Gather CPU information
