@@ -6,5 +6,5 @@ Pre-requisites
 2) Ansible-collection
 
 Notes: 
-1) Playbook.yml and Play_run.yml do not run on ARM64. Tool used = Tilemaker
-2) Playbook_planetiler.yml and Slow_planes.yml use Planetiler.
+1) Playbook.yml and Play_run.yml do not run on ARM64. Tool used is Tilemaker
+2) Playbook_planetiler.yml and Slow_planes.yml use Planetiler. Slow_planes limits RAM to 3G and serial processing for slower machines.
