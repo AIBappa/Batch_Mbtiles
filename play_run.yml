@@ -58,7 +58,6 @@
       community.docker.docker_container:
         name: shortbread-job
         image: ghcr.io/systemed/tilemaker:master
-        platform: linux/arm64
         command: >
           bash -c 'set -e;
           for f in /pbf/*.pbf; do
@@ -80,7 +79,6 @@
       community.docker.docker_container:
         name: omt-job
         image: ghcr.io/systemed/tilemaker:master
-        platform: linux/arm64
         command: >
           bash -c 'set -e;
           for f in /pbf/*.pbf; do
@@ -107,7 +105,6 @@
       community.docker.docker_container:
         name: valhalla-job
         image: ghcr.io/valhalla/valhalla:latest
-        platform: linux/arm64
         command: >
           bash -c 'set -e;
           for f in /pbf/*.pbf; do
@@ -125,4 +122,5 @@
           - "{{ pbf_dir }}:/pbf:ro"
           - "{{ routing_dir }}:/out"
         cleanup: true
+
         detach: false
