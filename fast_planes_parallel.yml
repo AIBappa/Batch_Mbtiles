@@ -1,0 +1,173 @@
+---
+- hosts: localhost
+  become: true
+
+  vars:
+    pbf_dir: /root/geo2day_india
+    shortbread_dir: /root/geo2day_mbtiles_india_shortbread
+    openmaptiles_dir: /root/geo2day_mbtiles_india_openmaptiles
+    routing_dir: /root/geo2day_routing_india
+    # Parallel jobs - ARM64 Ampere typically has many cores, adjust based on your CPU count
+    parallel_jobs: 2  # Conservative for 4GB RAM, increase if you have more RAM
+    # Memory per job (in MB) - with 4GB total, leave 500MB for OS
+    memory_per_job: 1750
+
+  tasks:
+    - name: Gather CPU information
+      setup:
+        filter: ansible_processor*
+
+    - name: Display CPU cores available
+      debug:
+        msg: "Detected {{ ansible_processor_vcpus }} vCPUs on ARM64 system"
+
+    - name: Ensure required packages are present
+      apt:
+        name:
+          - python3-pip
+          - python3-docker
+          - parallel
+          - jq
+        state: present
+        update_cache: true
+
+    - name: Ensure Ansible Docker collection is present
+      ansible.builtin.shell: ansible-galaxy collection install community.docker
+      args:
+        creates: /root/.ansible/collections/ansible_collections/community/docker
+
+    - name: Ensure output directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - "{{ shortbread_dir }}"
+        - "{{ openmaptiles_dir }}"
+        - "{{ routing_dir }}"
+        - /tmp/planetiler-cache
+        - /tmp/parallel-logs
+
+    # ---------- 1. Pull Docker images ---------------------
+    - name: Pull Planetiler image (ARM64 compatible)
+      community.docker.docker_image:
+        name: ghcr.io/onthegomap/planetiler:latest
+        source: pull
+
+    - name: Pull Valhalla image (ARM64 compatible)
+      community.docker.docker_image:
+        name: ghcr.io/valhalla/valhalla:latest
+        source: pull
+
+    # ---------- 2. Create processing scripts for GNU Parallel -------------
+    - name: Create OpenMapTiles processing script
+      copy:
+        dest: /tmp/process_openmaptiles.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+          
+          PBF_FILE="$1"
+          BASENAME=$(basename "$PBF_FILE" .pbf)
+          OUTPUT_FILE="{{ openmaptiles_dir }}/${BASENAME}.mbtiles"
+          
+          # Skip if already exists
+          if [ -f "$OUTPUT_FILE" ]; then
+            echo "SKIP: $OUTPUT_FILE already exists"
+            exit 0
+          fi
+          
+          echo "START: Processing $BASENAME for OpenMapTiles..."
+          
+          docker run --rm \
+            --name "planetiler-omt-${BASENAME}-$$" \
+            -v "{{ pbf_dir }}:/data/input:ro" \
+            -v "{{ openmaptiles_dir }}:/data/output" \
+            -v /tmp/planetiler-cache:/tmp/planetiler \
+            --memory="{{ memory_per_job }}m" \
+            --cpus="{{ ansible_processor_vcpus | int // parallel_jobs }}" \
+            -e JAVA_TOOL_OPTIONS="-Xmx{{ memory_per_job - 200 }}m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UseContainerSupport" \
+            ghcr.io/onthegomap/planetiler:latest \
+            openmaptiles \
+            --osm-path=/data/input/${BASENAME}.pbf \
+            --output=/data/output/${BASENAME}.mbtiles \
+            --storage=mmap \
+            --nodemap-type=array \
+            --download \
+            --threads={{ ansible_processor_vcpus | int // parallel_jobs }}
+          
+          echo "DONE: $BASENAME OpenMapTiles processing complete"
+
+    - name: Create Shortbread processing script
+      copy:
+        dest: /tmp/process_shortbread.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+          
+          PBF_FILE="$1"
+          BASENAME=$(basename "$PBF_FILE" .pbf)
+          OUTPUT_FILE="{{ shortbread_dir }}/${BASENAME}.mbtiles"
+          
+          # Skip if already exists
+          if [ -f "$OUTPUT_FILE" ]; then
+            echo "SKIP: $OUTPUT_FILE already exists"
+            exit 0
+          fi
+          
+          echo "START: Processing $BASENAME for Shortbread..."
+          
+          docker run --rm \
+            --name "planetiler-sb-${BASENAME}-$$" \
+            -v "{{ pbf_dir }}:/data/input:ro" \
+            -v "{{ shortbread_dir }}:/data/output" \
+            -v /tmp/planetiler-cache:/tmp/planetiler \
+            --memory="{{ memory_per_job }}m" \
+            --cpus="{{ ansible_processor_vcpus | int // parallel_jobs }}" \
+            -e JAVA_TOOL_OPTIONS="-Xmx{{ memory_per_job - 200 }}m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UseContainerSupport" \
+            ghcr.io/onthegomap/planetiler:latest \
+            shortbread \
+            --osm-path=/data/input/${BASENAME}.pbf \
+            --output=/data/output/${BASENAME}.mbtiles \
+            --storage=mmap \
+            --nodemap-type=array \
+            --download \
+            --threads={{ ansible_processor_vcpus | int // parallel_jobs }}
+          
+          echo "DONE: $BASENAME Shortbread processing complete"
+
+    - name: Create Valhalla processing script
+      copy:
+        dest: /tmp/process_valhalla.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+          
+          PBF_FILE="$1"
+          BASENAME=$(basename "$PBF_FILE" .pbf)
+          OUTPUT_DIR="{{ routing_dir }}/${BASENAME}_tiles"
+          
+          # Skip if already exists
+          if [ -d "$OUTPUT_DIR" ] && [ "$(ls -A $OUTPUT_DIR)" ]; then
+            echo "SKIP: $OUTPUT_DIR already exists and is not empty"
+            exit 0
+          fi
+          
+          echo "START: Processing $BASENAME for Valhalla routing..."
+          
+          mkdir -p "$OUTPUT_DIR"
+          
+          docker run --rm \
+            --name "valhalla-${BASENAME}-$$" \
+            -v "{{ pbf_dir }}:/pbf:ro" \
+            -v "{{ routing_dir }}:/out" \
+            --memory="{{ memory_per_job }}m" \
+            --cpus="{{ ansible_processor_vcpus | int // parallel_jobs }}" \
+            ghcr.io/valhalla/valhalla:latest \
+            bash -c "set -e;
+              base=\
