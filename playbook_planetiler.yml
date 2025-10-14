@@ -1,0 +1,120 @@
+---
+- hosts: localhost
+  become: true
+
+  vars:
+    pbf_dir: /root/geo2day_india
+    shortbread_dir: /root/geo2day_mbtiles_india_shortbread
+    openmaptiles_dir: /root/geo2day_mbtiles_india_openmaptiles
+    routing_dir: /root/geo2day_routing_india
+
+  tasks:
+    - name: Ensure python3-pip is present
+      apt:
+        name: python3-pip
+        state: present
+
+    - name: Ensure python3-docker is installed (Debian/Ubuntu)
+      apt:
+        name: python3-docker
+        state: present
+        update_cache: true
+
+    - name: Ensure Ansible Docker collection is present
+      ansible.builtin.shell: ansible-galaxy collection install community.docker
+      args:
+        creates: /root/.ansible/collections/ansible_collections/community/docker
+
+    - name: Ensure output directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - "{{ shortbread_dir }}"
+        - "{{ openmaptiles_dir }}"
+        - "{{ routing_dir }}"
+
+    # ---------- 1. Pull Planetiler image (works on ARM64) ----------------------------
+    - name: Pull Planetiler image
+      community.docker.docker_image:
+        name: ghcr.io/onthegomap/planetiler:latest
+        source: pull
+
+    # ---------- 2. OpenMapTiles schema with Planetiler (LOOP) ------------------------
+    - name: Find PBF files for OpenMapTiles
+      find:
+        paths: "{{ pbf_dir }}"
+        patterns: '*.pbf'
+      register: openmaptiles_pbf_files
+
+    - name: Planetiler OpenMapTiles – pbf → mbtiles (one per file)
+      community.docker.docker_container:
+        name: "planetiler-openmaptiles-{{ item.path | basename | regex_replace('\\.pbf$', '') }}"
+        image: ghcr.io/onthegomap/planetiler:latest
+        command: >-
+          openmaptiles --osm-path=/data/input/{{ item.path | basename }}
+                       --output=/data/output/{{ item.path | basename | regex_replace('\\.pbf$', '.mbtiles') }}
+                       --download
+        volumes:
+          - "{{ pbf_dir }}:/data/input:ro"
+          - "{{ openmaptiles_dir }}:/data/output"
+        cleanup: true
+        detach: false
+        memory: 6g
+      loop: "{{ openmaptiles_pbf_files.files }}"
+
+    # ---------- 3. Shortbread schema with Planetiler (LOOP) --------------------------
+    - name: Find PBF files for Shortbread
+      find:
+        paths: "{{ pbf_dir }}"
+        patterns: '*.pbf'
+      register: shortbread_pbf_files
+
+    - name: Planetiler Shortbread – pbf → mbtiles (one per file)
+      community.docker.docker_container:
+        name: "planetiler-shortbread-{{ item.path | basename | regex_replace('\\.pbf$', '') }}"
+        image: ghcr.io/onthegomap/planetiler:latest
+        command: >-
+          shortbread --osm-path=/data/input/{{ item.path | basename }}
+                     --output=/data/output/{{ item.path | basename | regex_replace('\\.pbf$', '.mbtiles') }}
+                     --download
+        volumes:
+          - "{{ pbf_dir }}:/data/input:ro"
+          - "{{ shortbread_dir }}:/data/output"
+        cleanup: true
+        detach: false
+        memory: 6g
+      loop: "{{ shortbread_pbf_files.files }}"
+
+    # ---------- 4. Valhalla routing graph ---------------------------------------------
+    - name: Pull Valhalla image
+      community.docker.docker_image:
+        name: ghcr.io/valhalla/valhalla:latest
+        source: pull
+
+    - name: Valhalla – pbf → routing tiles
+      community.docker.docker_container:
+        name: valhalla-job
+        image: ghcr.io/valhalla/valhalla:latest
+        command: >-
+          bash -c 'set -e;
+          for f in /pbf/*.pbf; do
+            base=$(basename "$f" .pbf);
+            echo "Processing $base for routing...";
+            mkdir -p /out/${base}_tiles;
+            valhalla_build_config \
+              --mjolnir-tile-dir /out/${base}_tiles \
+              --mjolnir-tile-extract /out/${base}.tar \
+              --mjolnir-timezone /out/${base}_tiles/timezones.sqlite \
+              --mjolnir-admin /out/${base}_tiles/admins.sqlite > /tmp/${base}.json;
+            valhalla_build_tiles -c /tmp/${base}.json "$f";
+            rm /tmp/${base}.json;
+          done'
+        volumes:
+          - "{{ pbf_dir }}:/pbf:ro"
+          - "{{ routing_dir }}:/out"
+        cleanup: true
+        detach: false

@@ -1,0 +1,149 @@
+---
+- hosts: localhost
+  become: true
+  serial: 1
+
+  vars:
+    pbf_dir: /root/geo2day_india
+    shortbread_dir: /root/geo2day_mbtiles_india_shortbread
+    openmaptiles_dir: /root/geo2day_mbtiles_india_openmaptiles
+    routing_dir: /root/geo2day_routing_india
+
+  tasks:
+    - name: Ensure python3-pip is present
+      apt:
+        name: python3-pip
+        state: present
+
+    - name: Ensure python3-docker is installed (Debian/Ubuntu)
+      apt:
+        name: python3-docker
+        state: present
+        update_cache: true
+
+    - name: Ensure Ansible Docker collection is present
+      ansible.builtin.shell: ansible-galaxy collection install community.docker
+      args:
+        creates: /root/.ansible/collections/ansible_collections/community/docker
+
+    - name: Ensure output directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - "{{ shortbread_dir }}"
+        - "{{ openmaptiles_dir }}"
+        - "{{ routing_dir }}"
+
+    # ---------- 1. Pull Planetiler image ---------------------
+    - name: Pull Planetiler image
+      community.docker.docker_image:
+        name: ghcr.io/onthegomap/planetiler:latest
+        source: pull
+
+    # ---------- 2. OpenMapTiles schema with Planetiler -------------
+    - name: Find PBF files for OpenMapTiles
+      find:
+        paths: "{{ pbf_dir }}"
+        patterns: '*.pbf'
+      register: openmaptiles_pbf_files
+
+    - name: Stat output MBTiles for OpenMapTiles
+      stat:
+        path: "{{ openmaptiles_dir }}/{{ item.path | basename | regex_replace('\\.pbf$', '.mbtiles') }}"
+      register: openmaptiles_mbtiles_stat
+      loop: "{{ openmaptiles_pbf_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Planetiler OpenMapTiles – pbf → mbtiles (sequential, skips if output exists)
+      community.docker.docker_container:
+        name: "planetiler-openmaptiles-{{ item.0.path | basename | regex_replace('\\.pbf$', '') }}"
+        image: ghcr.io/onthegomap/planetiler:latest
+        command: >-
+          openmaptiles
+          --osm-path=/data/input/{{ item.0.path | basename }}
+          --output=/data/output/{{ item.0.path | basename | regex_replace('\\.pbf$', '.mbtiles') }}
+          --storage=mmap
+          --download
+        volumes:
+          - "{{ pbf_dir }}:/data/input:ro"
+          - "{{ openmaptiles_dir }}:/data/output"
+        cleanup: true
+        detach: false
+        env:
+          JAVA_TOOL_OPTIONS: "-Xmx3g"
+      loop: "{{ openmaptiles_pbf_files.files | zip(openmaptiles_mbtiles_stat.results) | list }}"
+      loop_control:
+        label: "{{ item.0.path | basename }}"
+      when: not item.1.stat.exists
+
+    # ---------- 3. Shortbread schema with Planetiler -------------
+    - name: Find PBF files for Shortbread
+      find:
+        paths: "{{ pbf_dir }}"
+        patterns: '*.pbf'
+      register: shortbread_pbf_files
+
+    - name: Stat output MBTiles for Shortbread
+      stat:
+        path: "{{ shortbread_dir }}/{{ item.path | basename | regex_replace('\\.pbf$', '.mbtiles') }}"
+      register: shortbread_mbtiles_stat
+      loop: "{{ shortbread_pbf_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Planetiler Shortbread – pbf → mbtiles (sequential, skips if output exists)
+      community.docker.docker_container:
+        name: "planetiler-shortbread-{{ item.0.path | basename | regex_replace('\\.pbf$', '') }}"
+        image: ghcr.io/onthegomap/planetiler:latest
+        command: >-
+          shortbread
+          --osm-path=/data/input/{{ item.0.path | basename }}
+          --output=/data/output/{{ item.0.path | basename | regex_replace('\\.pbf$', '.mbtiles') }}
+          --storage=mmap
+          --download
+        volumes:
+          - "{{ pbf_dir }}:/data/input:ro"
+          - "{{ shortbread_dir }}:/data/output"
+        cleanup: true
+        detach: false
+        env:
+          JAVA_TOOL_OPTIONS: "-Xmx3g"
+      loop: "{{ shortbread_pbf_files.files | zip(shortbread_mbtiles_stat.results) | list }}"
+      loop_control:
+        label: "{{ item.0.path | basename }}"
+      when: not item.1.stat.exists
+
+    # ---------- 4. Valhalla routing graph ----------------------
+    - name: Pull Valhalla image
+      community.docker.docker_image:
+        name: ghcr.io/valhalla/valhalla:latest
+        source: pull
+
+    - name: Valhalla – pbf → routing tiles
+      community.docker.docker_container:
+        name: valhalla-job
+        image: ghcr.io/valhalla/valhalla:latest
+        command: >-
+          bash -c 'set -e;
+          for f in /pbf/*.pbf; do
+            base=$(basename "$f" .pbf);
+            echo "Processing $base for routing...";
+            mkdir -p /out/${base}_tiles;
+            valhalla_build_config \
+              --mjolnir-tile-dir /out/${base}_tiles \
+              --mjolnir-tile-extract /out/${base}.tar \
+              --mjolnir-timezone /out/${base}_tiles/timezones.sqlite \
+              --mjolnir-admin /out/${base}_tiles/admins.sqlite > /tmp/${base}.json;
+            valhalla_build_tiles -c /tmp/${base}.json "$f";
+            rm /tmp/${base}.json;
+          done'
+        volumes:
+          - "{{ pbf_dir }}:/pbf:ro"
+          - "{{ routing_dir }}:/out"
+        cleanup: true
+        detach: false
