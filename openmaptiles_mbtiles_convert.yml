@@ -1,0 +1,90 @@
+---
+- hosts: localhost
+  become: true
+
+  vars:
+    pbf_dir: /root/geo2day_india
+    openmaptiles_dir: /root/geo2day_mbtiles_india_openmaptiles
+    # Conservative settings for reliability
+    parallel_jobs: 1  # One at a time
+    memory_per_job: 12000  # 12GB
+    threads_per_job: 8
+
+  tasks:
+    - name: Display system info
+      debug:
+        msg: "Converting {{ pbf_dir }} files to OpenMapTiles MBTiles format"
+
+    - name: Ensure output directory exists
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ openmaptiles_dir }}"
+        - /tmp/logs
+
+    - name: Pull Planetiler Docker image
+      command: docker pull ghcr.io/onthegomap/planetiler:latest
+
+    - name: Convert all PBF files to OpenMapTiles MBTiles
+      shell: |
+        # Find all PBF files
+        for PBF_FILE in {{ pbf_dir }}/*.pbf; do
+          BASENAME=$(basename "$PBF_FILE" .pbf)
+          
+          echo "Processing: $BASENAME with 12GB memory" | tee -a /tmp/logs/${BASENAME}.log
+          
+          # Create unique temp directory
+          TEMP_DIR="/tmp/temp_$BASENAME"
+          mkdir -p "$TEMP_DIR"
+          
+          # Check if output already exists
+          if [ ! -f "{{ openmaptiles_dir }}/${BASENAME}.mbtiles" ]; then
+            echo "Starting OpenMapTiles conversion for $BASENAME" | tee -a /tmp/logs/${BASENAME}.log
+            
+            docker run --rm \
+              -v "{{ pbf_dir }}:/data/input:ro" \
+              -v "{{ openmaptiles_dir }}:/data/output" \
+              -v "$TEMP_DIR:/data/tmp" \
+              --memory="{{ memory_per_job }}m" \
+              --cpus="{{ threads_per_job }}" \
+              ghcr.io/onthegomap/planetiler:latest \
+              openmaptiles \
+              --osm-path=/data/input/${BASENAME}.pbf \
+              --output=/data/output/${BASENAME}.mbtiles \
+              --nodemap-type=sparsearray \
+              --tmpdir=/data/tmp \
+              --download \
+              --force \
+              --threads={{ threads_per_job }} 2>&1 | tee -a /tmp/logs/${BASENAME}.log
+            
+            # Verify output
+            if [ -f "{{ openmaptiles_dir }}/${BASENAME}.mbtiles" ] && [ $(stat -c%s "{{ openmaptiles_dir }}/${BASENAME}.mbtiles") -gt 10000 ]; then
+              echo "SUCCESS: OpenMapTiles conversion completed for $BASENAME" | tee -a /tmp/logs/${BASENAME}.log
+            else
+              echo "FAILED: OpenMapTiles conversion failed for $BASENAME" | tee -a /tmp/logs/${BASENAME}.log
+              rm -f "{{ openmaptiles_dir }}/${BASENAME}.mbtiles"
+            fi
+          else
+            echo "SKIPPED: OpenMapTiles file already exists for $BASENAME" | tee -a /tmp/logs/${BASENAME}.log
+          fi
+          
+          # Clean up temp directory
+          rm -rf "$TEMP_DIR"
+          
+          echo "Completed processing: $BASENAME" | tee -a /tmp/logs/${BASENAME}.log
+        done
+
+    - name: Show conversion results
+      shell: |
+        echo "=== CONVERSION RESULTS ==="
+        echo "OpenMapTiles files created: $(ls {{ openmaptiles_dir }}/*.mbtiles 2>/dev/null | wc -l)"
+        echo ""
+        echo "Output files:"
+        ls -lh {{ openmaptiles_dir }}/*.mbtiles 2>/dev/null || echo "No files found"
+        echo ""
+        echo "Total disk usage:"
+        du -sh {{ openmaptiles_dir }} 2>/dev/null || true
+        echo ""
+        echo "Logs available at: /tmp/logs/"
